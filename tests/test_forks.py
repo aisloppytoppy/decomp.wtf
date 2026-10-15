@@ -35,6 +35,8 @@ def _git(cwd: Path, *args: str) -> str:
 
 @pytest.fixture(scope="module")
 def fork(tmp_path_factory):
+    if toolchains.installed("gcc-2.7.2-kmc") is None or toolchains.installed("objdiff-cli") is None or not shutil.which("git"):
+        pytest.skip("needs gcc-2.7.2-kmc, objdiff-cli and git")
     base = tmp_path_factory.mktemp("fork")
     upstream = base / "upstream"
     shutil.copytree(FORK_SRC, upstream)
