@@ -303,9 +303,16 @@ async def test_agent_of_project_resolution(tmp_path):
         headers = {"authorization": f"Bearer {token}"}
         request = None
 
-    # 1. When no project exists, both work tools and chat tools raise ToolError with "no project is open..."
+    # 1. When no project exists, static tools (guide) succeed without requiring a project
+    res_guide_early = await mcp.call_tool("guide", {"topic": "workflow"}, context=MockCtx())
+    assert res_guide_early is not None
+    guide_early_text = "\n".join(getattr(b, "text", "") for b in res_guide_early.content)
+    assert "[Auto-selected project" not in guide_early_text
+    assert "matching loop" in guide_early_text
+
+    # But project-dependent work tools and chat tools raise ToolError with "no project is open..."
     with pytest.raises(ToolError, match="no project is open"):
-        await mcp.call_tool("guide", {"topic": "workflow"}, context=MockCtx())
+        await mcp.call_tool("project_info", {}, context=MockCtx())
 
     with pytest.raises(ToolError, match="no project is open"):
         await mcp.call_tool("progress", {}, context=MockCtx())
@@ -318,17 +325,25 @@ async def test_agent_of_project_resolution(tmp_path):
             ("sample-slug", "Sample Game", "mips", str(home), cfg),
         )
 
-    # 3. With project present, auto-selection triggers on first tool, announces, and persists assignment
+    # 3. Static tools still do not trigger auto-selection even with project present
     res_guide = await mcp.call_tool("guide", {"topic": "workflow"}, context=MockCtx())
     assert res_guide is not None
     guide_text = "\n".join(getattr(b, "text", "") for b in res_guide.content)
-    assert "[Auto-selected project: sample-slug]" in guide_text
+    assert "[Auto-selected project" not in guide_text
     assert "matching loop" in guide_text
+    assert manager.project_of(agent.id) is None
 
-    # 4. Verify assignment is persisted to manager and settings
+    # 4. Project-dependent work tool triggers auto-selection, announces, and persists assignment
+    res_info = await mcp.call_tool("project_info", {}, context=MockCtx())
+    assert res_info is not None
+    info_text = "\n".join(getattr(b, "text", "") for b in res_info.content)
+    assert "[Auto-selected project: sample-slug]" in info_text
+    assert "Sample Game" in info_text
+
+    # 5. Verify assignment is persisted to manager and settings
     assert manager.project_of(agent.id) == "sample-slug"
 
-    # 5. Chat tools (progress, open_gui, list_projects) are immediately aligned without error
+    # 6. Chat tools (progress, open_gui, list_projects) are immediately aligned without error
     res_prog = await mcp.call_tool("progress", {}, context=MockCtx())
     prog_text = "\n".join(getattr(b, "text", "") for b in res_prog.content)
     assert "sample-slug" in prog_text
@@ -342,4 +357,18 @@ async def test_agent_of_project_resolution(tmp_path):
     res_list = await mcp.call_tool("list_projects", {}, context=MockCtx())
     list_text = "\n".join(getattr(b, "text", "") for b in res_list.content)
     assert "Open now: sample-slug" in list_text
+
+    # 7. When the assigned project is deleted, static tools clean up stale state and succeed
+    with net.store.tx() as conn:
+        conn.execute("DELETE FROM projects WHERE slug = ?", ("sample-slug",))
+
+    res_guide_post_del = await mcp.call_tool("guide", {"topic": "workflow"}, context=MockCtx())
+    assert res_guide_post_del is not None
+    assert manager.project_of(agent.id) is None
+    settings_data = json.loads((home / ".decomp" / "settings.json").read_text())
+    assert settings_data.get("last_project") is None
+
+    # Project-dependent tools fail again with no projects in DB
+    with pytest.raises(ToolError, match="no project is open"):
+        await mcp.call_tool("project_info", {}, context=MockCtx())
 

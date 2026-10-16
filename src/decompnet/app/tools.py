@@ -204,6 +204,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
 
 ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
+STATIC_TOOLS = {"guide"}
 
 
 READ_ONLY_TOOLS = {
@@ -246,13 +247,13 @@ def call(net: RomNetwork, agent: Agent, slug: str, name: str, args: dict) -> str
 ALWAYS_LOAD = {"antigravity/alwaysLoad": True}
 
 
-def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]]) -> MCPServer:
+def build_mcp(net: RomNetwork, agent_of: Callable[[Context, bool], tuple[Agent, str]]) -> MCPServer:
     """MCP server for CLI agents. `agent_of` maps a request to (agent, project slug)."""
     mcp = MCPServer(name="decomp", title="decomp.wtf", instructions=INSTRUCTIONS, version=__version__)
 
     async def run(ctx: Context, name: str, **args) -> str:
         try:
-            agent, slug = agent_of(ctx)
+            agent, slug = agent_of(ctx, require_project=(name not in STATIC_TOOLS))
         except NetworkError as e:
             raise ToolError(str(e)) from None
         if agent.scope == "read" and name not in READ_ONLY_TOOLS:

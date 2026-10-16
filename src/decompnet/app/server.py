@@ -295,10 +295,10 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     if extra := os.environ.get("DECOMP_ALLOWED_HOSTS"):
         allowed_hosts.update(h.strip() for h in extra.split(",") if h.strip())
 
-    def resolve_project(agent_id: int) -> tuple[str, bool]:
+    def resolve_project(agent_id: int, auto_select: bool = True) -> tuple[str, bool]:
         """Resolve the active project for an agent: session assignment, last_project, or newest project.
         Persists the assignment and returns (slug, was_auto_selected).
-        Raises NetworkError if no project exists in the database.
+        Raises NetworkError if no project exists in the database and auto_select is True.
         """
         slug = manager.project_of(agent_id)
         if slug and net.store.one("SELECT 1 FROM projects WHERE slug=?", slug):
@@ -314,6 +314,9 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             settings.data["last_project"] = None
             settings.save()
 
+        if not auto_select:
+            return "", False
+
         row = net.store.one("SELECT slug FROM projects ORDER BY id DESC LIMIT 1")
         if row:
             slug = row["slug"]
@@ -324,7 +327,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
 
         raise NetworkError("no project is open: list_projects() and open_project(slug), or import_game(path)")
 
-    def agent_of(ctx: Context):
+    def agent_of(ctx: Context, require_project: bool = True):
         headers = getattr(ctx, "headers", None) or {}
         auth = headers.get("authorization") or headers.get("Authorization") or ""
         req = getattr(ctx, "request", None)
@@ -334,7 +337,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             client_ip = getattr(getattr(req, "client", None), "host", None) or req.headers.get("x-forwarded-for")
             user_agent = req.headers.get("user-agent")
         agent = net.authenticate(auth.removeprefix("Bearer ").strip() or None, client_ip=client_ip, user_agent=user_agent)
-        slug, auto = resolve_project(agent.id)
+        slug, auto = resolve_project(agent.id, auto_select=require_project)
         if auto:
             setattr(agent, "_auto_selected", True)
         return agent, slug
