@@ -3,16 +3,19 @@
 # For a team room at your own address, also publish the room port (decomp share <project> --address ...).
 services:
   decomp:
-    build: site/public
+    build: .
     container_name: decomp-wtf
     restart: unless-stopped
     init: true
     environment:
       DECOMP_PORT: "6464"
-      DECOMP_SOURCE: release        # or branch:<name> to follow a branch on GitHub
     ports:
       - "127.0.0.1:6464:6464"
     volumes:
-      - decomp-wtf-home:/home/decomp
+      # Persist projects and user database across container updates without shadowing application binaries:
+      - decomp-wtf-projects:/home/decomp/Decomp
+      - decomp-wtf-data:/home/decomp/.local/share/decompnet
+
 volumes:
-  decomp-wtf-home:
+  decomp-wtf-projects:
+  decomp-wtf-data:
