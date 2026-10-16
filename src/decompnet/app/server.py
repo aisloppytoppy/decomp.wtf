@@ -729,6 +729,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),
         "/api/stats": (lambda s, r, d: net.stats(s), ["GET"]),
+        "/api/context": (lambda s, r, d: {"context": net.get_context(s, r.query_params.get("function") or None) if not net.fork_slug(s) else ""}, ["GET"]),
     }
     for path, (fn, methods) in routes.items():
         mcp.custom_route(path, methods=methods)(with_project(fn))

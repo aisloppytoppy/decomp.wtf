@@ -53,6 +53,103 @@ function toast(html, kind = "") {
   setTimeout(() => t.remove(), kind === "err" ? 7500 : 4700);
 }
 
+async function copyText(text, msg = "Copied.") {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    toast(msg);
+  } catch (_) {
+    toast("Failed to copy to clipboard", "err");
+  }
+}
+
+async function getFunctionContext(d) {
+  if (d && d.context) return d.context;
+  try {
+    const res = await api(`/api/context?slug=${S.slug}&function=${encodeURIComponent(d.name)}`);
+    return (res && res.context) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+async function getFunctionOutputAsm(d) {
+  let diff = S.lastDiff;
+  if (!diff || (S.fnDetail && S.fnDetail.name !== d.name)) {
+    try {
+      diff = await api(`/api/diff?slug=${S.slug}&name=${encodeURIComponent(d.name)}&which=${S.which || "latest"}`);
+      if (S.fnDetail && S.fnDetail.name === d.name) S.lastDiff = diff;
+    } catch (_) {
+      diff = null;
+    }
+  }
+  if (!diff) return { text: "(No compiled output or diff available)", hasInsn: false, error: null };
+  if (diff.error) return { text: `Compilation failed:\n${diff.error}`, hasInsn: false, error: diff.error };
+  if (diff.rows && diff.rows.length) {
+    const insns = diff.rows.map((r) => r[2] || "").filter(Boolean).join("\n");
+    return { text: insns || "(No instructions output)", hasInsn: Boolean(insns), error: null, problems: diff.problems };
+  }
+  return { text: "(No attempts compiled yet)", hasInsn: false, error: null };
+}
+
+function getFunctionNotesText(d) {
+  if (!d || !d.notes || !d.notes.length) return "No notes recorded.";
+  return d.notes.map((n) => `- [${n.agent || "Agent"} (${clock(n.created_at)})]: ${n.text}`).join("\n");
+}
+
+async function getFunctionBundle(d) {
+  const [ctx, outAsm] = await Promise.all([getFunctionContext(d), getFunctionOutputAsm(d)]);
+  const cCode = $("fnEdit") ? $("fnEdit").value : (d.source || "");
+  const isDirty = S.editDirty && cCode !== d.source;
+  const kinds = { matched: "Matching C", best: "Best attempt so far", latest: S.ov.kind === "fork" ? "In the source now" : "Latest attempt", draft: "Machine draft (m2c)" };
+  const cKind = (kinds[d.source_kind] || "C") + (isDirty ? " (modified in editor, uncompiled)" : "");
+
+  const lines = [
+    `# Function: ${d.name}`,
+    `- Address: ${hex8(d.vram)}`,
+  ];
+  if (S.ov && S.ov.kind === "fork") {
+    lines.push(`- Unit: ${d.unit || ""}`);
+    if (d.match_percent != null) lines.push(`- Match: ${d.match_percent.toFixed(1)}%`);
+  } else {
+    lines.push(`- ROM Offset: 0x${(d.rom_offset || 0).toString(16).toUpperCase()}`);
+  }
+  lines.push(
+    `- Size: ${d.size} bytes (${d.insns} instructions)`,
+    `- Status: ${d.status}`,
+    `- Best Score: ${d.best != null ? d.best : "None"}`
+  );
+  if (d.calls && d.calls.length) lines.push(`- Calls: ${d.calls.join(", ")}`);
+  if (d.called_by && d.called_by.length) lines.push(`- Called by: ${d.called_by.join(", ")}`);
+
+  lines.push("", "## Notes", getFunctionNotesText(d));
+
+  lines.push("", "## Context (`context.h`)", "```c", (ctx || "/* No context header defined */").trim(), "```");
+
+  lines.push("", `## Current C Code (${cKind})`, "```c", (cCode || "/* No C written yet */").trim(), "```");
+
+  lines.push("", "## Target Assembly", "```mips", (d.asm || "(No target assembly)").trim(), "```");
+
+  lines.push("", "## Current Output Assembly", "```mips", outAsm.text.trim(), "```");
+
+  if (outAsm.problems && outAsm.problems.length) {
+    lines.push("", "### Differences / Compiler Mismatches:", ...outAsm.problems.map((p) => `- ${p}`));
+  }
+
+  return lines.join("\n");
+}
+
 async function followJob(id, logEl, onUpdate) {
   for (;;) {
     const job = await api(`/api/job?id=${id}`);
@@ -1825,7 +1922,7 @@ async function openFn(name) {
   S.fn = name;
   $("drawer").hidden = false;
   document.body.classList.add("locked");
-  if (!again) { S.ftab = null; S.which = "latest"; S.diffKey = null; $("diff").innerHTML = ""; $("diffSum").textContent = ""; }
+  if (!again) { S.ftab = null; S.which = "latest"; S.diffKey = null; S.lastDiff = null; $("diff").innerHTML = ""; $("diffSum").textContent = ""; }
   drawMap();
   document.querySelectorAll("#fnRows tr").forEach((tr) => tr.classList.toggle("sel", tr.dataset.fn === name));
   await refreshFn(true);
@@ -1886,7 +1983,50 @@ async function refreshFn(first) {
     const kinds = { matched: "Matching C", best: "Best attempt so far", latest: S.ov.kind === "fork" ? "In the source now" : "Latest attempt", draft: "Machine draft (m2c)" };
     $("fnSrcKind").textContent = kinds[d.source_kind] || "No C yet";
     if (!S.editDirty || first) setEditor(d.source || "", d);
-    $("copySrc").onclick = () => navigator.clipboard.writeText($("fnEdit").value).then(() => toast("Copied."));
+    $("copySrc").onclick = () => copyText($("fnEdit").value, "C code copied.");
+    $("copyTargetAsm").onclick = () => copyText(d.asm, "Target assembly copied.");
+    $("copyContextBtn").onclick = async () => {
+      const ctx = await getFunctionContext(d);
+      copyText(ctx || "/* (empty context) */", "Context header (context.h) copied.");
+    };
+    $("copyDiffAsm").onclick = async () => {
+      const out = await getFunctionOutputAsm(d);
+      copyText(out.text, out.error ? "Compiler error log copied." : "Output assembly copied.");
+    };
+    $("copyNotesBtn").onclick = () => copyText(getFunctionNotesText(d), "Notes copied.");
+
+    $("fnCopyMenu").onclick = (e) => {
+      e.stopPropagation();
+      $("fnCopyPop").hidden = !$("fnCopyPop").hidden;
+    };
+    $("fnCopyAll").onclick = async () => {
+      $("fnCopyPop").hidden = true;
+      const bundle = await getFunctionBundle(d);
+      copyText(bundle, "All function data copied for AI.");
+    };
+    $("fnCopyContext").onclick = async () => {
+      $("fnCopyPop").hidden = true;
+      const ctx = await getFunctionContext(d);
+      copyText(ctx || "/* (empty context) */", "Context header (context.h) copied.");
+    };
+    $("fnCopyC").onclick = () => {
+      $("fnCopyPop").hidden = true;
+      copyText($("fnEdit").value, "C code copied.");
+    };
+    $("fnCopyTarget").onclick = () => {
+      $("fnCopyPop").hidden = true;
+      copyText(d.asm, "Target assembly copied.");
+    };
+    $("fnCopyOutput").onclick = async () => {
+      $("fnCopyPop").hidden = true;
+      const out = await getFunctionOutputAsm(d);
+      copyText(out.text, out.error ? "Compiler error log copied." : "Output assembly copied.");
+    };
+    $("fnCopyNotes").onclick = () => {
+      $("fnCopyPop").hidden = true;
+      copyText(getFunctionNotesText(d), "Notes copied.");
+    };
+
     renderFnChart(d);
     $("diffWhich").hidden = d.status === "matched" || S.ov.kind === "fork" || d.scores.filter((x) => x.score != null).length < 2;
     const xr = [];
@@ -1894,7 +2034,8 @@ async function refreshFn(first) {
     if (d.called_by.length) xr.push(`<div><b>called by</b>${d.called_by.map(fnLink).join("")}</div>`);
     $("fnXref").innerHTML = xr.join("");
     $("fnXref").querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn.split("+")[0]); });
-    $("fnNotes").innerHTML = d.notes.length ? `<p class="col-title">Notes from agents</p>` + d.notes.map((n) => `<div class="note"><small>${esc(n.agent)} · ${clock(n.created_at)}</small>${esc(n.text)}</div>`).join("") : "";
+    $("fnNotesHead").hidden = !d.notes.length;
+    $("fnNotes").innerHTML = d.notes.map((n) => `<div class="note"><small>${esc(n.agent || "Agent")} · ${clock(n.created_at)}</small>${esc(n.text)}</div>`).join("");
     const tab = S.ftab || (d.status === "matched" || !d.scores.length ? "code" : "diff");
     showFnTab(tab);
   } catch (e) {
@@ -1949,6 +2090,7 @@ async function tryIt() {
     }
     S.editDirty = false;
     S.diffKey = null;
+    S.lastDiff = null;
     await refreshFn(false);
     if (r.score != null) { S.ftab = "diff"; showFnTab("diff"); }
   } catch (e) {
@@ -2060,7 +2202,10 @@ async function loadDiff() {
   if (!$("diff").innerHTML) $("diffSum").textContent = "Compiling…";
   try {
     const d = await api(`/api/diff?slug=${S.slug}&name=${encodeURIComponent(d0.name)}&which=${S.which}`);
-    if (S.fnDetail && S.fnDetail.name === d0.name) renderDiff(d);
+    if (S.fnDetail && S.fnDetail.name === d0.name) {
+      S.lastDiff = d;
+      renderDiff(d);
+    }
   } catch (e) { $("diffSum").innerHTML = `<span class="bad">${esc(e.message)}</span>`; S.diffKey = null; }
 }
 
@@ -2145,6 +2290,7 @@ function renderProgress() {
 /* ------------------------------------------------------------------ drawers, keys */
 function closeAll() {
   if (!$("drawer").hidden) giveBack(null);
+  if ($("fnCopyPop")) $("fnCopyPop").hidden = true;
   for (const id of ["drawer", "dialog"]) $(id).hidden = true;
   document.body.classList.remove("locked");
   S.fn = null;
@@ -2154,12 +2300,22 @@ document.querySelectorAll(".drawer").forEach((d) => {
   d.addEventListener("click", (e) => {
     if (e.target !== d && !e.target.closest("[data-close]")) return;
     if (d.id === "drawer") { giveBack(null); S.fn = null; drawMap(); }
+    if ($("fnCopyPop")) $("fnCopyPop").hidden = true;
     d.hidden = true;
     if ($("drawer").hidden && $("dialog").hidden) document.body.classList.remove("locked");
   });
 });
+document.addEventListener("click", (e) => {
+  const pop = $("fnCopyPop");
+  if (pop && !pop.hidden && !e.target.closest("#fnCopyWrap")) pop.hidden = true;
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { if (!$("launchPop").hidden) { hideLaunch(); return; } closeAll(); return; }
+  if (e.key === "Escape") {
+    if ($("fnCopyPop") && !$("fnCopyPop").hidden) { $("fnCopyPop").hidden = true; return; }
+    if (!$("launchPop").hidden) { hideLaunch(); return; }
+    closeAll();
+    return;
+  }
   if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;  // typing
   if (!$("drawer").hidden && (e.key === "j" || e.key === "k")) { e.preventDefault(); stepFn(e.key === "j" ? 1 : -1); return; }
   if (e.key === "/" && S.slug && $("drawer").hidden) {

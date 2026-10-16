@@ -1620,6 +1620,7 @@ class RomNetwork(Network):
             with self._seed_lock:
                 self._seed_for(fn, proj)
             fn = self._function(fn["name"], slug)
+        ctx = self._context(proj["id"], fn["unit"])
         return {
             "name": fn["name"], "vram": fn["vram"], "rom_offset": fn["rom_offset"], "size": fn["size"],
             "insns": fn["n_insns"], "status": fn["status"], "best": fn["best_score"],
@@ -1631,6 +1632,8 @@ class RomNetwork(Network):
             "notes": [dict(n) for n in notes],
             "calls": [syms.label(a) for a in sorted(x["calls"].get(fn["vram"], ()))],
             "called_by": [syms.label(a) for a in sorted(x["called_by"].get(fn["vram"], ()))],
+            "context": ctx["header"] if ctx else "",
+            "context_version": ctx["version"] if ctx else 0,
         }
 
     def stats(self, slug: str) -> dict:

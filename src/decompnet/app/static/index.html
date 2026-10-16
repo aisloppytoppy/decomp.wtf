@@ -489,6 +489,21 @@
       <div class="row">
         <span class="badge" id="fnStatus"></span>
         <button class="ghost small-btn pin" id="fnPin" type="button" title="Agents take this function next">★ Next</button>
+        <div class="pop-wrap" id="fnCopyWrap">
+          <button class="ghost small-btn" id="fnCopyMenu" type="button" title="Copy function details, ASM, C, context, and notes">Copy ▾</button>
+          <div class="popover fn-copy-pop" id="fnCopyPop" hidden>
+            <button type="button" class="fn-copy-item main" id="fnCopyAll">
+              <span class="fci-title">Copy all for AI</span>
+              <span class="fci-sub">Context, C, Target ASM, Output ASM, Notes</span>
+            </button>
+            <div class="fn-copy-sep"></div>
+            <button type="button" class="fn-copy-item" id="fnCopyContext"><span>Copy Context (context.h)</span></button>
+            <button type="button" class="fn-copy-item" id="fnCopyC"><span>Copy Current C Code</span></button>
+            <button type="button" class="fn-copy-item" id="fnCopyTarget"><span>Copy Target Assembly</span></button>
+            <button type="button" class="fn-copy-item" id="fnCopyOutput"><span>Copy Output Assembly</span></button>
+            <button type="button" class="fn-copy-item" id="fnCopyNotes"><span>Copy Notes</span></button>
+          </div>
+        </div>
         <button class="ghost icon" id="fnPrev" type="button" aria-label="Previous function" title="Previous function (K)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.3 2.7 11.4 3.8 7.2 8l4.2 4.2-1.1 1.1L5 8z"/></svg></button>
         <button class="ghost icon" id="fnNext" type="button" aria-label="Next function" title="Next function (J)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.7 2.7 4.6 3.8 8.8 8l-4.2 4.2 1.1 1.1L11 8z"/></svg></button>
         <button class="ghost icon" data-close type="button" aria-label="Close" title="Close (Esc)">✕</button>
@@ -504,14 +519,26 @@
         <div class="seg small" id="diffWhich" hidden><button type="button" data-which="latest" class="on">Latest attempt</button><button type="button" data-which="best">Best</button></div>
       </div>
       <div id="fnDiffView">
-        <p class="diff-sum" id="diffSum"></p>
+        <div class="diff-head-row">
+          <p class="diff-sum" id="diffSum"></p>
+          <button class="link-btn" id="copyDiffAsm" type="button">Copy output ASM</button>
+        </div>
         <div class="diff" id="diff"></div>
         <ul class="problems" id="diffProblems"></ul>
       </div>
       <div class="code-cols" id="fnCodeView" hidden>
-        <div><p class="col-title">Target assembly (from your game)</p><pre class="code asm" id="fnAsm"></pre></div>
         <div>
-          <p class="col-title"><span id="fnSrcKind">C</span><button class="link-btn" id="copySrc" type="button">Copy</button></p>
+          <p class="col-title"><span>Target assembly (from your game)</span><button class="link-btn" id="copyTargetAsm" type="button">Copy</button></p>
+          <pre class="code asm" id="fnAsm"></pre>
+        </div>
+        <div>
+          <p class="col-title">
+            <span id="fnSrcKind">C</span>
+            <span class="fn-src-actions">
+              <button class="link-btn" id="copyContextBtn" type="button" title="Copy context.h">Copy context.h</button>
+              <button class="link-btn" id="copySrc" type="button">Copy C</button>
+            </span>
+          </p>
           <div class="editor" id="editor">
             <pre class="code c" id="fnSrc" aria-hidden="true"></pre>
             <textarea id="fnEdit" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="The function's C"></textarea>
@@ -524,6 +551,10 @@
         </div>
       </div>
       <div class="xref" id="fnXref"></div>
+      <div class="fn-notes-head" id="fnNotesHead" hidden>
+        <p class="col-title">Notes from agents</p>
+        <button class="link-btn" id="copyNotesBtn" type="button">Copy notes</button>
+      </div>
       <div id="fnNotes"></div>
       <div class="note-box">
         <label class="field"><span>A note for agents on this function (they read it when they take it)</span>

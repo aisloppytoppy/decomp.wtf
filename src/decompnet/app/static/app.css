@@ -689,3 +689,72 @@ a.ghost, a.primary { text-decoration: none; }
 .nav-proj.broken .np-meta, .err-text { color: var(--miss); }
 .credit { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--raise); color: var(--ink-2); max-width: 760px; }
 .credit a { color: inherit; }
+
+/* Function copy menu and buttons */
+.fn-copy-pop {
+  width: 280px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fn-copy-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  transition: background .12s;
+}
+.fn-copy-item:hover {
+  background: var(--raise);
+}
+.fn-copy-item.main {
+  background: color-mix(in srgb, var(--match-bg) 40%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--match) 25%, transparent);
+}
+.fn-copy-item.main:hover {
+  background: color-mix(in srgb, var(--match-bg) 65%, var(--panel));
+}
+.fn-copy-item .fci-title {
+  font-weight: 600;
+  color: var(--match-ink);
+}
+.fn-copy-item .fci-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.fn-copy-sep {
+  height: 1px;
+  background: var(--line-soft);
+  margin: 4px 0;
+}
+.diff-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.fn-src-actions {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+}
+.fn-notes-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.fn-notes-head .col-title {
+  margin-bottom: 0;
+}
+
