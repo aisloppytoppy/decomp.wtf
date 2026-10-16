@@ -62,6 +62,11 @@ MIGRATIONS = [
     ("functions", "rom_offset", "INTEGER"),                    # ROM projects: where its bytes are in the ROM
     ("functions", "meta", "TEXT"),                             # forks: symbol, demangled name, source file
     ("functions", "boost", "INTEGER NOT NULL DEFAULT 0"),      # claim order: >0 matching it matches that many twins
+    ("agents", "expires_at", "REAL"),                          # epoch timestamp when token expires (None = never)
+    ("agents", "scope", "TEXT NOT NULL DEFAULT 'full'"),       # 'full' (read/write) | 'read' (read-only observer)
+    ("agents", "last_ip", "TEXT"),                             # client IP on last authentication
+    ("agents", "user_agent", "TEXT"),                          # client User-Agent on last authentication
+    ("agents", "token_prefix", "TEXT"),                        # masked token prefix for identification
 ]
 
 

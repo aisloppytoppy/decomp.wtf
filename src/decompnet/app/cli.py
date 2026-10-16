@@ -140,7 +140,7 @@ def run(args) -> int:
 
     sock = _listen(restarted["port"] if restarted else args.port, exact=bool(restarted) or _fixed_port())
     port = sock.getsockname()[1]
-    secret = restarted["secret"] if restarted else secrets.token_urlsafe(24)
+    secret = restarted["secret"] if restarted else os.environ.get("DECOMP_SECRET") or secrets.token_urlsafe(24)
     state_file.write_text(json.dumps({"port": port, "secret": secret, "pid": os.getpid()}), encoding="utf-8")
     try:
         os.chmod(state_file, 0o600)
@@ -421,6 +421,108 @@ def shortcut(args) -> int:
     return 0
 
 
+def token_cmd(args) -> int:
+    """Manage MCP bearer tokens (create, list, revoke, revoke-all)."""
+    from .bridge import ensure_app
+
+    info = ensure_app(home_dir())
+    port = info["port"]
+    secret = info["secret"]
+
+    def call_api(path: str, method: str = "GET", body: dict | None = None) -> dict:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={
+                "Cookie": f"decomp_live={secret}",
+                "X-Decomp": "1",
+                "Host": f"127.0.0.1:{port}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            err = json.loads(e.read() or b"{}").get("error") or str(e)
+            raise SystemExit(f"error: {err}") from None
+
+    action = args.action or "create"
+    if action == "list":
+        res = call_api("/api/agents/tokens")
+        tokens = res.get("tokens", [])
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        print(f"Streamable HTTP MCP URL: {res.get('url')}")
+        if not tokens:
+            print("No active bearer tokens found.")
+            return 0
+        print(f"\n{'ID':<5} {'NAME':<18} {'TOKEN':<12} {'SCOPE':<8} {'EXPIRES':<20} {'CREATED':<20} {'LAST SEEN'}")
+        print("-" * 95)
+        for t in tokens:
+            created = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t["created_at"])) if t.get("created_at") else "-"
+            last = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t["last_seen"])) if t.get("last_seen") else "never"
+            if t.get("expires_at"):
+                exp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t["expires_at"]))
+                if t.get("is_expired"):
+                    exp += " [EXPIRED]"
+            else:
+                exp = "never"
+            tok_prefix = t.get("token_prefix") or "dn_***"
+            scope = t.get("scope") or "full"
+            print(f"#{t['id']:<4} {t['name']:<18} {tok_prefix:<12} {scope:<8} {exp:<20} {created:<20} {last}")
+        return 0
+
+    elif action in ("revoke-all", "revoke") and getattr(args, "all", False):
+        res = call_api("/api/agents/tokens/revoke-all", method="POST")
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        print(f"Revoked all bearer tokens ({res.get('revoked_count', 0)} removed).")
+        return 0
+
+    elif action == "revoke":
+        target = args.id or args.name
+        if not target:
+            raise SystemExit("specify --id or --name of the token to revoke (or --all to revoke all)")
+        res = call_api("/api/agents/token/revoke", method="POST", body={"id": target})
+        if res.get("ok"):
+            print(f"Revoked token: {target}")
+            return 0
+        else:
+            print(f"Token not found or could not be revoked: {target}")
+            return 1
+
+    else:  # create
+        payload = {"name": args.name or "chat"}
+        if args.token:
+            payload["token"] = args.token
+        if getattr(args, "scope", None):
+            payload["scope"] = args.scope
+        if getattr(args, "ttl", None):
+            payload["ttl"] = args.ttl
+        res = call_api("/api/agents/token", method="POST", body=payload)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        print(f"Agent:     {res['agent']}")
+        print(f"Token:     {res['token']}")
+        print(f"Scope:     {res.get('scope', 'full')}")
+        if res.get("expires_at"):
+            exp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(res["expires_at"]))
+            print(f"Expires:   {exp_str}")
+        else:
+            print(f"Expires:   never")
+        print(f"MCP URL:   {res['url']}")
+        print("\nCursor / Claude Desktop config (mcpServers):")
+        print(json.dumps(res["configs"]["mcp_json"], indent=2))
+        print("\nClaude Code CLI command:")
+        print(f"  {res['configs']['claude_command']}")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="decomp", description="decomp.wtf: your AI agents decompile your games, matching byte for byte")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -464,6 +566,16 @@ def main(argv: list[str] | None = None) -> int:
     m = sub.add_parser("mcp", help="serve decomp.wtf to the AI agent you talk to (stdio MCP; starts the app if needed)")
     m.add_argument("--name", default=os.environ.get("DECOMP_AGENT_NAME") or "chat",
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
+    tok = sub.add_parser("token", help="create, list, or revoke MCP bearer tokens for Streamable HTTP MCP")
+    tok.add_argument("action", choices=["create", "list", "revoke", "revoke-all"], nargs="?", default="create",
+                     help="create (default), list, revoke, or revoke-all")
+    tok.add_argument("--name", default="chat", help="name for the agent token (default: chat)")
+    tok.add_argument("--token", default=None, help="custom token string (default: auto-generate)")
+    tok.add_argument("--scope", choices=["full", "read"], default="full", help="token permission scope (full or read)")
+    tok.add_argument("--ttl", default=None, help="TTL duration e.g. 7d, 30d, 24h, 86400, or never")
+    tok.add_argument("--id", default=None, help="token ID or agent name to revoke")
+    tok.add_argument("--all", action="store_true", help="revoke all tokens when used with revoke")
+    tok.add_argument("--json", action="store_true", help="output result in JSON format")
     args = ap.parse_args(argv)
     __import__("decompnet").utf8_output()
     if args.cmd == "mcp":
@@ -471,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         return bridge(args.name)
     return {"setup": setup, "stop": stop, "shortcut": shortcut, "connect": connect_agents, "share": share,
             "host": host, "join": join, "service": service_cmd, "url": url_cmd, "update": update_cmd,
-            "install-info": install_info}.get(args.cmd, run)(args)
+            "install-info": install_info, "token": token_cmd}.get(args.cmd, run)(args)
 
 
 if __name__ == "__main__":

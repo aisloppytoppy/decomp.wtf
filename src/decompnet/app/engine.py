@@ -1299,14 +1299,14 @@ class RomNetwork(Network):
             "slug": proj["slug"], "title": proj["name"], "description": proj["description"],
             "platform": cfg.get("platform", "n64"), "platform_name": detect.PLATFORMS.get(cfg.get("platform", "n64"), ""),
             "compilers": PLATFORM_COMPILERS.get(cfg.get("platform", "n64"), []),
-            "rom": {k: cfg["rom"].get(k) for k in ("title", "game_code", "region", "size", "sha1", "byte_order", "compiler_guess")},
-            "compiler": {"toolchain": tc.id, "name": SHORT_NAMES.get(tc.id, tc.name), "flags": cfg["compiler"]["flags"],
+            "rom": {k: (cfg.get("rom") or {}).get(k) for k in ("title", "game_code", "region", "size", "sha1", "byte_order", "compiler_guess")},
+            "compiler": {"toolchain": tc.id, "name": SHORT_NAMES.get(tc.id, tc.name), "flags": cfg["compiler"].get("flags", []),
                          "installed": toolchains.installed(tc.id) is not None, "proprietary": tc.proprietary,
                          "supported": tc.supported, "wsl": tc.via_wsl,
                          "why": None if tc.supported else toolchains.unsupported_cpu()},
             "functions": agg["total"] or 0, "matched": agg["matched"] or 0, "bytes": agg["bytes"] or 0,
             "matched_bytes": agg["matched_bytes"] or 0, "attempts": agg["attempts"] or 0,
-            "context_version": self._context(proj["id"])["version"],
+            "context_version": ctx["version"] if (ctx := self._context(proj["id"])) else 0,
             "folder": proj["root"],
             "export": cfg.get("export"),
             "exportable": cfg.get("platform", "n64") in ("n64", "psx", "ps2", "gba"),
@@ -1691,25 +1691,114 @@ class RomNetwork(Network):
             db.execute("UPDATE functions SET seed=NULL WHERE project_id=? AND status='open'", (proj["id"],))
             self._event(db, proj["id"], None, "compiler", f"{tc.name} {' '.join(cfg['compiler']['flags'])}")
 
-    def chat_agent(self, base: str) -> tuple[Agent, str]:
-        """An identity for an agent the user talks to (Claude Code, Codex, ... connected with `decomp mcp`): `base`,
+    def chat_agent(
+        self,
+        base: str,
+        custom_token: str | None = None,
+        ttl_seconds: float | None = None,
+        scope: str = "full",
+    ) -> tuple[Agent, str]:
+        """An identity for an agent the user talks to (Claude Code, Codex, ... connected with `decomp mcp` or HTTP): `base`,
         or base_2, base_3... when another session of the same agent is active right now (never base-2: that's the
         name of a helper session, see local_agent)."""
         base = re.sub(r"[^A-Za-z0-9_.-]+", "-", base).strip("-")[:30] or "chat"
         for n in range(1, 100):
             name = base if n == 1 else f"{base}_{n}"
-            row = self.store.one("SELECT id, origin, last_seen FROM agents WHERE name=?", name)
-            if row is None or (row["origin"] == "chat" and (row["last_seen"] or 0) < time.time() - 600):
+            row = self.store.one("SELECT id, origin, created_at, last_seen FROM agents WHERE name=?", name)
+            if row is None or (row["origin"] == "chat" and (row["last_seen"] or row["created_at"] or 0) < time.time() - 600):
                 break
         else:
             raise NetworkError("too many chat sessions at once")
+        token = custom_token.strip() if custom_token else ("dn_" + secrets.token_urlsafe(24))
+        if not token.startswith("dn_"):
+            token = "dn_" + token
+        prefix = token[:7] + "..." if len(token) > 10 else token[:4] + "..."
+        now = time.time()
+        expires_at = (now + ttl_seconds) if ttl_seconds and ttl_seconds > 0 else None
+        valid_scope = "read" if scope == "read" else "full"
         if row is None:
-            token = self.register_agent(name, "you", trusted=True, origin="chat")
-        else:
-            token = "dn_" + secrets.token_urlsafe(24)
             with self.store.tx() as db:
-                db.execute("UPDATE agents SET token_hash=?, last_seen=? WHERE id=?", (_hash_token(token), time.time(), row["id"]))
-        return self.authenticate(token), token
+                cur = db.execute(
+                    "INSERT INTO agents(name,owner,token_hash,created_at,trusted,origin,terms_accepted_at,expires_at,scope,token_prefix) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (name, "you", _hash_token(token), now, 1, "chat", now, expires_at, valid_scope, prefix),
+                )
+                agent_id = cur.lastrowid
+        else:
+            with self.store.tx() as db:
+                db.execute(
+                    "UPDATE agents SET token_hash=?, expires_at=?, scope=?, token_prefix=? WHERE id=?",
+                    (_hash_token(token), expires_at, valid_scope, prefix, row["id"]),
+                )
+                agent_id = row["id"]
+        return Agent(id=agent_id, name=name, owner="you", trusted=True, scope=valid_scope), token
+
+    def list_chat_tokens(self) -> list[dict]:
+        rows = self.store.all(
+            "SELECT id, name, token_prefix, scope, created_at, expires_at, last_seen, last_ip, user_agent "
+            "FROM agents WHERE origin='chat' ORDER BY id DESC"
+        )
+        now = time.time()
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "token_prefix": r["token_prefix"] or "dn_***",
+                "scope": r["scope"] or "full",
+                "created_at": r["created_at"],
+                "expires_at": r["expires_at"],
+                "is_expired": bool(r["expires_at"] and r["expires_at"] < now),
+                "last_seen": r["last_seen"],
+                "last_ip": r["last_ip"],
+                "user_agent": r["user_agent"],
+            }
+            for r in rows
+        ]
+
+    def revoke_chat_token(self, target: str | int) -> bool:
+        with self.store.tx() as db:
+            if isinstance(target, int) or (isinstance(target, str) and str(target).isdigit()):
+                res = db.execute("DELETE FROM agents WHERE id=? AND origin='chat'", (int(target),))
+            else:
+                res = db.execute("DELETE FROM agents WHERE name=? AND origin='chat'", (str(target),))
+            return res.rowcount > 0
+
+    def revoke_all_chat_tokens(self) -> int:
+        with self.store.tx() as db:
+            res = db.execute("DELETE FROM agents WHERE origin='chat'")
+            return res.rowcount
+
+    def setup_bearer_token(
+        self,
+        name: str,
+        token: str,
+        origin: str = "chat",
+        ttl_seconds: float | None = None,
+        scope: str = "full",
+    ) -> tuple[Agent, str]:
+        token = token.strip()
+        if not token.startswith("dn_"):
+            token = "dn_" + token
+        prefix = token[:7] + "..." if len(token) > 10 else token[:4] + "..."
+        row = self.store.one("SELECT id FROM agents WHERE name=?", name)
+        now = time.time()
+        expires_at = (now + ttl_seconds) if ttl_seconds and ttl_seconds > 0 else None
+        valid_scope = "read" if scope == "read" else "full"
+        with self.store.tx() as db:
+            if row is None:
+                cur = db.execute(
+                    "INSERT INTO agents(name,owner,token_hash,created_at,trusted,origin,terms_accepted_at,expires_at,scope,token_prefix) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (name, "you", _hash_token(token), now, 1, origin, now, expires_at, valid_scope, prefix),
+                )
+                agent_id = cur.lastrowid
+            else:
+                db.execute(
+                    "UPDATE agents SET token_hash=?, expires_at=?, scope=?, token_prefix=? WHERE id=?",
+                    (_hash_token(token), expires_at, valid_scope, prefix, row["id"]),
+                )
+                agent_id = row["id"]
+        return Agent(id=agent_id, name=name, owner="you", trusted=True, scope=valid_scope), token
 
     def is_chat(self, agent: Agent) -> bool:
         row = self.store.one("SELECT origin FROM agents WHERE id=?", agent.id)

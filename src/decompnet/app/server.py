@@ -256,6 +256,29 @@ def _static(name: str) -> bytes | None:
         return None
 
 
+def _parse_ttl(val: str | int | float | None) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val) if val > 0 else None
+    s = str(val).strip().lower()
+    if not s or s in ("0", "never", "inf", "infinity", "none"):
+        return None
+    if s.endswith("d"):
+        return float(s[:-1]) * 86400
+    if s.endswith("h"):
+        return float(s[:-1]) * 3600
+    if s.endswith("m"):
+        return float(s[:-1]) * 60
+    if s.endswith("s"):
+        return float(s[:-1])
+    try:
+        f = float(s)
+        return f if f > 0 else None
+    except ValueError:
+        return None
+
+
 def build(net: RomNetwork, home: Path, port: int, secret: str):
     mcp_url = f"http://127.0.0.1:{port}/mcp"
     build_id = (updates.installed().get("commit") or "")[:12]  # a branch install: the commit it came from
@@ -269,15 +292,57 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         settings.save()
     manager.persist = remember
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    if extra := os.environ.get("DECOMP_ALLOWED_HOSTS"):
+        allowed_hosts.update(h.strip() for h in extra.split(",") if h.strip())
+
+    def resolve_project(agent_id: int) -> tuple[str, bool]:
+        """Resolve the active project for an agent: session assignment, last_project, or newest project.
+        Persists the assignment and returns (slug, was_auto_selected).
+        Raises NetworkError if no project exists in the database.
+        """
+        slug = manager.project_of(agent_id)
+        if slug and net.store.one("SELECT 1 FROM projects WHERE slug=?", slug):
+            return slug, False
+        if slug:
+            manager.assignments.pop(agent_id, None)
+
+        slug = settings.data.get("last_project")
+        if slug and net.store.one("SELECT 1 FROM projects WHERE slug=?", slug):
+            manager.assignments[agent_id] = slug
+            return slug, False
+        if slug:
+            settings.data["last_project"] = None
+            settings.save()
+
+        row = net.store.one("SELECT slug FROM projects ORDER BY id DESC LIMIT 1")
+        if row:
+            slug = row["slug"]
+            manager.assignments[agent_id] = slug
+            settings.data["last_project"] = slug
+            settings.save()
+            return slug, True
+
+        raise NetworkError("no project is open: list_projects() and open_project(slug), or import_game(path)")
 
     def agent_of(ctx: Context):
-        headers = ctx.headers or {}
+        headers = getattr(ctx, "headers", None) or {}
         auth = headers.get("authorization") or headers.get("Authorization") or ""
-        agent = net.authenticate(auth.removeprefix("Bearer ").strip() or None)
-        slug = manager.project_of(agent.id) or settings.data.get("last_project")
-        if not slug:
-            raise NetworkError("no project is open in decomp.wtf; open a ROM in the app first")
+        req = getattr(ctx, "request", None)
+        client_ip = None
+        user_agent = None
+        if req:
+            client_ip = getattr(getattr(req, "client", None), "host", None) or req.headers.get("x-forwarded-for")
+            user_agent = req.headers.get("user-agent")
+        agent = net.authenticate(auth.removeprefix("Bearer ").strip() or None, client_ip=client_ip, user_agent=user_agent)
+        slug, auto = resolve_project(agent.id)
+        if auto:
+            setattr(agent, "_auto_selected", True)
         return agent, slug
+
+    if env_token := os.environ.get("DECOMP_MCP_TOKEN"):
+        env_token = env_token.strip()
+        if env_token:
+            net.setup_bearer_token("env-token", env_token, origin="chat")
 
     threading.Thread(target=collab.local_addresses, daemon=True).start()  # `tailscale status` can take seconds
     # rooms this computer belongs to reconnect (members keep their place; their agents wait while the host is away)
@@ -301,7 +366,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             continue
 
     mcp = tools.build_mcp(net, agent_of)
-    chat.register(mcp, net, manager, jobs, settings, port, secret)
+    chat.register(mcp, net, manager, jobs, settings, port, secret, resolve_project=resolve_project)
 
     # Each agent sees the tools for its job: the agent you talk to sees everything; a helper only the work tools
     # for its project's kind (fewer tool definitions in every request, nothing it shouldn't call).
@@ -314,6 +379,8 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             agent = net.authenticate(auth.removeprefix("Bearer ").strip() or None)
         except NetworkError:
             return ListToolsResult(tools=everything)
+        if agent.scope == "read":
+            return ListToolsResult(tools=[t for t in everything if t.name in tools.READ_ONLY_TOOLS])
         if net.is_chat(agent):
             return ListToolsResult(tools=everything)
         slug = manager.project_of(agent.id) or settings.data.get("last_project")
@@ -325,10 +392,18 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     def guard(request: Request, write: bool = False) -> Response | None:
         if request.headers.get("host") not in allowed_hosts:
             return JSONResponse({"error": "bad host"}, status_code=403)
-        if not secrets.compare_digest(request.cookies.get(COOKIE, ""), secret):
+        cookie_secret = request.cookies.get(COOKIE, "")
+        header_secret = request.headers.get("x-decomp-secret", "")
+        auth_header = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        has_secret = (secrets.compare_digest(cookie_secret, secret) or
+                      secrets.compare_digest(header_secret, secret) or
+                      secrets.compare_digest(auth_header, secret))
+        if not has_secret:
             return JSONResponse({"error": "open decomp.wtf from the app or the `decomp` command"}, status_code=401)
-        if write and request.headers.get("x-decomp") != "1":
-            return JSONResponse({"error": "missing header"}, status_code=403)
+        if write:
+            auth_via_secret = secrets.compare_digest(header_secret, secret) or secrets.compare_digest(auth_header, secret)
+            if not auth_via_secret and request.headers.get("x-decomp") != "1":
+                return JSONResponse({"error": "missing header"}, status_code=403)
         return None
 
     async def body(request: Request) -> dict:
@@ -893,17 +968,79 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             return JSONResponse({"agents": [], "bridge": host, "host_bridge": host, **hostenv.info()})
         return JSONResponse({"agents": await anyio.to_thread.run_sync(rows), "bridge": connect.bridge_command()})
 
+    @mcp.custom_route("/api/agents/tokens", methods=["GET"])
+    async def api_agents_tokens(request: Request) -> Response:
+        """List active MCP bearer tokens."""
+        if (bad := guard(request)):
+            return bad
+        tokens = await anyio.to_thread.run_sync(net.list_chat_tokens)
+        req_host = request.headers.get("host") or f"127.0.0.1:{port}"
+        scheme = request.url.scheme or "http"
+        effective_mcp_url = f"{scheme}://{req_host}/mcp"
+        return JSONResponse({"url": effective_mcp_url, "tokens": tokens})
+
     @mcp.custom_route("/api/agents/token", methods=["POST"])
     async def api_agents_token(request: Request) -> Response:
-        """An identity for an agent the user talks to, connecting through `decomp mcp`."""
+        """Create or setup a bearer token for an agent connecting over MCP (stdio or Streamable HTTP)."""
         if (bad := guard(request, write=True)):
             return bad
         data = await body(request)
+        name = str(data.get("name") or "chat").strip()
+        custom_tok = str(data.get("token") or "").strip() or None
+        scope = str(data.get("scope") or "full").strip().lower()
+        ttl_val = data.get("ttl") or data.get("ttl_seconds") or data.get("expires_in")
+        ttl_seconds = _parse_ttl(ttl_val)
         try:
-            agent, token = net.chat_agent(str(data.get("name") or "chat"))
+            agent, token = await anyio.to_thread.run_sync(
+                lambda: net.chat_agent(name, custom_token=custom_tok, ttl_seconds=ttl_seconds, scope=scope)
+            )
         except NetworkError as e:
             return fail(e)
-        return JSONResponse({"agent": agent.name, "token": token, "url": mcp_url})
+        req_host = request.headers.get("host") or f"127.0.0.1:{port}"
+        scheme = request.url.scheme or "http"
+        effective_mcp_url = f"{scheme}://{req_host}/mcp"
+        row = net.store.one("SELECT expires_at, token_prefix, scope FROM agents WHERE id=?", agent.id)
+        return JSONResponse({
+            "agent": agent.name,
+            "token": token,
+            "token_prefix": row["token_prefix"] if row else (token[:7] + "..."),
+            "scope": agent.scope,
+            "expires_at": row["expires_at"] if row else None,
+            "url": effective_mcp_url,
+            "configs": {
+                "mcp_json": {
+                    "mcpServers": {
+                        "decomp": {
+                            "type": "http",
+                            "url": effective_mcp_url,
+                            "headers": {"Authorization": f"Bearer {token}"}
+                        }
+                    }
+                },
+                "claude_command": f'claude mcp add --transport http decomp {effective_mcp_url} --header "Authorization: Bearer {token}"'
+            }
+        })
+
+    @mcp.custom_route("/api/agents/token/revoke", methods=["POST"])
+    @mcp.custom_route("/api/agents/token", methods=["DELETE"])
+    async def api_agents_token_revoke(request: Request) -> Response:
+        """Revoke an MCP bearer token."""
+        if (bad := guard(request, write=True)):
+            return bad
+        data = await body(request)
+        target = data.get("id") or data.get("name") or request.query_params.get("id") or request.query_params.get("name")
+        if not target:
+            return JSONResponse({"error": "missing id or name"}, status_code=400)
+        ok = await anyio.to_thread.run_sync(net.revoke_chat_token, target)
+        return JSONResponse({"ok": ok})
+
+    @mcp.custom_route("/api/agents/tokens/revoke-all", methods=["POST"])
+    async def api_agents_tokens_revoke_all(request: Request) -> Response:
+        """Revoke all active MCP bearer tokens."""
+        if (bad := guard(request, write=True)):
+            return bad
+        count = await anyio.to_thread.run_sync(net.revoke_all_chat_tokens)
+        return JSONResponse({"ok": True, "revoked_count": count})
 
     @mcp.custom_route("/api/agents/stop", methods=["POST"])
     async def api_agents_stop(request: Request) -> Response:

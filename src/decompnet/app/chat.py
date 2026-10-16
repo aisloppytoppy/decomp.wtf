@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Callable
 
 import anyio
 from mcp.server.mcpserver import Context
@@ -32,22 +33,53 @@ Report progress in terms of functions and % of code matched. The game's code is 
 """
 
 
-def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
-    def chat_agent(ctx: Context):
-        headers = ctx.headers or {}
+def register(
+    mcp,
+    net,
+    manager,
+    jobs,
+    settings,
+    port: int,
+    secret: str,
+    resolve_project: Callable[[int], tuple[str, bool]] | None = None,
+) -> None:
+    def chat_agent(ctx: Context, allow_read: bool = True):
+        headers = getattr(ctx, "headers", None) or {}
         auth = headers.get("authorization") or headers.get("Authorization") or ""
+        req = getattr(ctx, "request", None)
+        client_ip = None
+        user_agent = None
+        if req:
+            client_ip = getattr(getattr(req, "client", None), "host", None) or req.headers.get("x-forwarded-for")
+            user_agent = req.headers.get("user-agent")
         try:
-            agent = net.authenticate(auth.removeprefix("Bearer ").strip() or None)
+            agent = net.authenticate(auth.removeprefix("Bearer ").strip() or None, client_ip=client_ip, user_agent=user_agent)
         except NetworkError as e:
             raise ToolError(str(e)) from None
         if not net.is_chat(agent):
             raise ToolError("this tool is for the agent the user talks to; helper agents only decompile functions")
+        if not allow_read and agent.scope == "read":
+            raise ToolError("read-only token cannot perform this mutating action")
         return agent
 
+    def announce(agent, slug: str, text: str) -> str:
+        if getattr(agent, "_auto_selected", False):
+            setattr(agent, "_auto_selected", False)
+            return f"[Auto-selected project: {slug}]\n{text}"
+        return text
+
     def current(agent) -> str:
+        if resolve_project is not None:
+            try:
+                slug, auto = resolve_project(agent.id)
+                if auto:
+                    setattr(agent, "_auto_selected", True)
+                return slug
+            except NetworkError as e:
+                raise ToolError(str(e)) from None
         slug = manager.project_of(agent.id) or settings.data.get("last_project")
         if not slug:
-            raise ToolError("no project is open: list_projects() and open_project(), or import_game(path)")
+            raise ToolError("no project is open: list_projects() and open_project(slug), or import_game(path)")
         return slug
 
     def resolve(name: str) -> str:
@@ -109,7 +141,7 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
             own_copy: true only after the user confirmed it's their own legally obtained copy
             compiler: optional compiler id; leave empty to let decomp.wtf pick
         """
-        agent = chat_agent(ctx)
+        agent = chat_agent(ctx, allow_read=False)
         if not own_copy:
             raise ToolError("ask the user to confirm this is their own legally obtained copy of the game, then call "
                             "import_game again with own_copy=true")
@@ -161,21 +193,26 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
         """Open decomp.wtf's live view of the current project in the user's browser: the function map, what every
         agent is doing, diffs, progress. Do this once when you start, so the user can watch."""
         agent = chat_agent(ctx)
-        slug = manager.project_of(agent.id) or settings.data.get("last_project")
+        try:
+            slug = current(agent)
+        except ToolError:
+            slug = None
         url = f"http://127.0.0.1:{port}/?k={secret}" + (f"#/p/{slug}" if slug else "")
         ok = await anyio.to_thread.run_sync(lambda: hostenv.open_url(url))
         where = f"http://127.0.0.1:{port}/" + (f"#/p/{slug}" if slug else "")
         if ok:
-            return f"Opened the live view in the user's browser ({where})."
-        if hostenv.runtime() == "docker":  # the container can't reach the user's browser: hand them the link
-            return f"Give the user this link to open the live view (it signs their browser in): {url}"
-        return f"Couldn't open a browser here; the user can run `decomp` to open the app ({where})."
+            msg = f"Opened the live view in the user's browser ({where})."
+        elif hostenv.runtime() == "docker":  # the container can't reach the user's browser: hand them the link
+            msg = f"Give the user this link to open the live view (it signs their browser in): {url}"
+        else:
+            msg = f"Couldn't open a browser here; the user can run `decomp` to open the app ({where})."
+        return announce(agent, slug, msg) if slug else msg
 
     @mcp.tool(meta=tools.ALWAYS_LOAD)
     async def start_agents(ctx: Context, count: int = 1, kind: str = "", per_session: int = 0) -> str:
         """Start helper agents that decompile the current project in parallel with you (headless, shown live in
         the app). `kind`: claude, codex, antigravity or opencode (default: the first one installed)."""
-        agent = chat_agent(ctx)
+        agent = chat_agent(ctx, allow_read=False)
         slug = current(agent)
         if not kind:
             kind = next((a["id"] for a in agents.detect() if a["installed"] and a["id"] != "api"), "")
@@ -186,18 +223,20 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
             ids = manager.start(kind, slug, max(1, min(int(count), 8)), options)
         except ValueError as e:
             raise ToolError(str(e)) from None
-        return (f"Started {', '.join(ids)} on {slug}. They claim functions you aren't working on; progress() and "
-                f"the live view show their work. stop_agents() stops them.")
+        msg = (f"Started {', '.join(ids)} on {slug}. They claim functions you aren't working on; progress() and "
+               f"the live view show their work. stop_agents() stops them.")
+        return announce(agent, slug, msg)
 
     @mcp.tool(meta=tools.ALWAYS_LOAD)
     async def stop_agents(ctx: Context) -> str:
         """Stop the helper agents working on the current project."""
-        agent = chat_agent(ctx)
+        agent = chat_agent(ctx, allow_read=False)
         slug = current(agent)
         stopped = [s.id for s in list(manager.sessions.values()) if s.slug == slug and s.state in ("starting", "working", "waiting")]
         for sid in stopped:
             manager.stop(sid)
-        return f"Stopped {', '.join(stopped)}." if stopped else "No helper agents were running on this project."
+        msg = f"Stopped {', '.join(stopped)}." if stopped else "No helper agents were running on this project."
+        return announce(agent, slug, msg)
 
     @mcp.tool(meta=tools.ALWAYS_LOAD)
     async def progress(ctx: Context) -> str:
@@ -222,30 +261,34 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
                 out.append("recent matches: " + ", ".join(f"{e['detail']} ({e['agent']})" for e in matches))
             return "\n".join(out)
 
-        return await anyio.to_thread.run_sync(build)
+        res = await anyio.to_thread.run_sync(build)
+        return announce(agent, slug, res)
 
     @mcp.tool(meta=tools.ALWAYS_LOAD)
     async def run_autopilot(ctx: Context) -> str:
         """Try every open function's machine draft again (free matches). Worth it after types and names improved."""
-        agent = chat_agent(ctx)
+        agent = chat_agent(ctx, allow_read=False)
         slug = current(agent)
         try:
             st = net.start_autopilot(slug)
         except NetworkError as e:
             raise ToolError(str(e)) from None
-        return f"Autopilot is trying {st['total']} functions' machine drafts in the background; progress() shows it."
+        msg = f"Autopilot is trying {st['total']} functions' machine drafts in the background; progress() shows it."
+        return announce(agent, slug, msg)
 
     @mcp.tool(meta=tools.ALWAYS_LOAD)
     async def export_project(ctx: Context) -> str:
         """Write the project as a normal decomp source tree (matched C, the rest as assembly, a build script) and
         check that it rebuilds the game byte for byte. Returns where it is."""
-        agent = chat_agent(ctx)
+        agent = chat_agent(ctx, allow_read=False)
         slug = current(agent)
         try:
             res = await anyio.to_thread.run_sync(lambda: net.export_rom(slug, log=lambda *_: None))
         except (NetworkError, RuntimeError, OSError) as e:
             raise ToolError(str(e)) from None
         if res.get("identical") is None:
-            return f"This project is already a source tree: {res['path']} (every match is committed to git)."
-        verdict = "rebuilds the game byte for byte" if res["identical"] else "does NOT rebuild identically yet"
-        return f"Exported to {res['path']}: {res.get('matched')} of {res.get('functions')} functions are C; it {verdict}."
+            msg = f"This project is already a source tree: {res['path']} (every match is committed to git)."
+        else:
+            verdict = "rebuilds the game byte for byte" if res["identical"] else "does NOT rebuild identically yet"
+            msg = f"Exported to {res['path']}: {res.get('matched')} of {res.get('functions')} functions are C; it {verdict}."
+        return announce(agent, slug, msg)

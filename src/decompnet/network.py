@@ -56,6 +56,7 @@ class Agent:
     name: str
     owner: str | None
     trusted: bool = False
+    scope: str = "full"
 
 
 def _hash_token(token: str) -> str:
@@ -78,7 +79,8 @@ class Network:
     # ------------------------------------------------------------------ agents
 
     def register_agent(self, name: str, owner: str | None = None, *, trusted: bool = True, origin: str = "cli",
-                       terms_accepted: bool = False) -> str:
+                       terms_accepted: bool = False, expires_at: float | None = None, scope: str = "full",
+                       token_prefix: str | None = None) -> str:
         """Mint an agent token. Operator-created (CLI) agents are trusted; self-registered (web) agents
         start at reputation level 'new' and earn the rest through verified matches."""
         name = name.strip()
@@ -87,24 +89,40 @@ class Network:
         owner = (owner or "").strip()[:60] or None
         token = "dn_" + secrets.token_urlsafe(24)
         now = time.time()
+        prefix = token_prefix or (token[:7] + "..." if len(token) > 10 else token[:4] + "...")
+        valid_scope = "read" if scope == "read" else "full"
         with self.store.tx() as db:
             if db.execute("SELECT 1 FROM agents WHERE lower(name)=lower(?)", (name,)).fetchone():
                 raise NetworkError(f"agent name {name!r} is taken")
             db.execute(
-                "INSERT INTO agents(name,owner,token_hash,created_at,trusted,origin,terms_accepted_at) VALUES(?,?,?,?,?,?,?)",
-                (name, owner, _hash_token(token), now, int(trusted), origin, now if terms_accepted else None),
+                "INSERT INTO agents(name,owner,token_hash,created_at,trusted,origin,terms_accepted_at,expires_at,scope,token_prefix) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (name, owner, _hash_token(token), now, int(trusted), origin, now if terms_accepted else None, expires_at, valid_scope, prefix),
             )
         return token
 
-    def authenticate(self, token: str | None) -> Agent:
+    def authenticate(self, token: str | None, client_ip: str | None = None, user_agent: str | None = None) -> Agent:
         if not token:
             raise NetworkError("missing API token: add `--header \"Authorization: Bearer dn_...\"` to your MCP config")
-        row = self.store.one("SELECT id,name,owner,trusted FROM agents WHERE token_hash=?", _hash_token(token))
+        row = self.store.one("SELECT id,name,owner,trusted,expires_at,scope FROM agents WHERE token_hash=?", _hash_token(token))
         if row is None:
             raise NetworkError("invalid API token")
+        now = time.time()
+        if row["expires_at"] and row["expires_at"] < now:
+            raise NetworkError("expired API token")
+        scope = row["scope"] or "full"
         with self.store.tx() as db:
-            db.execute("UPDATE agents SET last_seen=? WHERE id=?", (time.time(), row["id"]))
-        return Agent(row["id"], row["name"], row["owner"], bool(row["trusted"]))
+            updates = ["last_seen=?"]
+            params = [now]
+            if client_ip:
+                updates.append("last_ip=?")
+                params.append(client_ip)
+            if user_agent:
+                updates.append("user_agent=?")
+                params.append(user_agent[:255])
+            params.append(row["id"])
+            db.execute(f"UPDATE agents SET {', '.join(updates)} WHERE id=?", params)
+        return Agent(row["id"], row["name"], row["owner"], bool(row["trusted"]), scope)
 
     def _require_budget(self, agent: Agent) -> None:
         ok, why = policy.compile_budget(self.store, agent.id)

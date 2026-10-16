@@ -18,6 +18,16 @@ function since(t) {
   return s < 60 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago`
     : s < 172800 ? "yesterday" : `${Math.round(s / 86400)} days ago`;
 }
+function until(t) {
+  if (!t) return "never";
+  const s = t - Date.now() / 1000;
+  if (s <= 0) return "expired";
+  if (s < 60) return "< 1 min";
+  if (s < 3600) return `in ${Math.max(1, Math.round(s / 60))} min`;
+  if (s < 86400) return `in ${Math.round(s / 3600)} h`;
+  if (s < 172800) return "tomorrow";
+  return `in ${Math.round(s / 86400)} days`;
+}
 function duration(h) { return h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : h < 48 ? `${h.toFixed(h < 10 ? 1 : 0)} h` : `${Math.round(h / 24)} days`; }
 function bytes(n) { return n >= 1 << 20 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} bytes`; }
 function money(usd) { return usd >= 10 ? `$${usd.toFixed(0)}` : `$${usd.toFixed(2)}`; }
@@ -2481,21 +2491,130 @@ function renderAgentsPage() {
     if (cancel) cancel.onclick = () => { S.addingEndpoint = false; renderAgentsPage(); };
   });
   if ($("epAdd")) $("epAdd").onclick = () => { S.addingEndpoint = true; renderAgentsPage(); };
-  $("mcpBox").innerHTML = `<p class="muted small">Connect the agent you talk to, once. Then ask it in your terminal: <i>“decompile my game at ~/roms/game.z64”</i>. It imports it, opens this view and works with every tool here.</p>
-    <div class="setup-group" id="mcpRows"><p class="muted small">Looking…</p></div>
-    <p class="col-title">Any other MCP client (Cursor, Claude Desktop, Windsurf…)</p><pre class="code" id="mcpJson"></pre>
-    <p class="col-title">A client that connects by URL (HTTP MCP)</p>
-    <p class="muted small">It needs a token: a password for this app's tools, so keep it to yourself. Making a new one for the same name replaces the old one.</p>
-    <div class="lz-row"><label class="field"><span>Name it goes by</span><input id="mcpName" class="mono" value="http-client"></label><button class="ghost small-btn" id="mcpToken" type="button">Make a token</button></div>
-    <pre class="code" id="mcpHttp" hidden></pre>`;
-  connectRows($("mcpRows")).then((r) => { if (r) $("mcpJson").textContent = JSON.stringify({ mcpServers: { decomp: { command: r.bridge[0], args: r.bridge.slice(1) } } }, null, 2); });
-  $("mcpToken").onclick = async () => {
-    try {
-      const t = await api("/api/agents/token", { method: "POST", body: { name: $("mcpName").value.trim() || "http-client" } });
-      $("mcpHttp").hidden = false;
-      $("mcpHttp").textContent = JSON.stringify({ mcpServers: { decomp: { type: "http", url: t.url, headers: { Authorization: `Bearer ${t.token}` } } } }, null, 2);
-    } catch (e) { toast(esc(e.message), "err"); }
-  };
+  renderMcpBox();
+}
+
+async function renderMcpBox() {
+  connectRows($("mcpRows")).then((r) => {
+    if (r && $("mcpJson")) $("mcpJson").textContent = JSON.stringify({ mcpServers: { decomp: { command: r.bridge[0], args: r.bridge.slice(1) } } }, null, 2);
+  });
+
+  if ($("mcpNewTokenBox") && (!$("mcpTokenCmdBox") || !$("mcpTokenCmdBox").innerHTML)) {
+    $("mcpNewTokenBox").hidden = true;
+  }
+
+  if (!$("mcpBox").dataset.wired) {
+    $("mcpBox").dataset.wired = "1";
+
+    if ($("mcpDismissTokenBtn")) {
+      $("mcpDismissTokenBtn").onclick = () => {
+        if ($("mcpNewTokenBox")) $("mcpNewTokenBox").hidden = true;
+      };
+    }
+
+    if ($("mcpRevokeAllBtn")) {
+      $("mcpRevokeAllBtn").onclick = async () => {
+        if (!confirm("Are you sure you want to revoke ALL bearer tokens? All active agents connected via HTTP will lose access.")) return;
+        try {
+          const res = await api("/api/agents/tokens/revoke-all", { method: "POST" });
+          toast(`Revoked ${res.revoked_count} tokens.`);
+          if ($("mcpNewTokenBox")) $("mcpNewTokenBox").hidden = true;
+          await loadMcpTokens();
+        } catch (e) {
+          toast(esc(e.message), "err");
+        }
+      };
+    }
+
+    if ($("mcpCreateTokenBtn")) {
+      $("mcpCreateTokenBtn").onclick = async () => {
+        const name = ($("mcpTokenName").value || "chat").trim();
+        const token = ($("mcpTokenValue").value || "").trim();
+        const scope = $("mcpTokenScope").value;
+        const ttl = $("mcpTokenTtl").value;
+        const btn = $("mcpCreateTokenBtn");
+        btn.disabled = true;
+        try {
+          const res = await api("/api/agents/token", {
+            method: "POST",
+            body: { name, token: token || undefined, scope, ttl: ttl !== "never" ? ttl : undefined },
+          });
+          toast(`Token created for ${res.agent}!`, "match");
+          $("mcpNewTokenBox").hidden = false;
+          $("mcpTokenCmdBox").innerHTML = cmdBox(res.token);
+          $("mcpTokenMeta").textContent = `Scope: ${res.scope || 'full'} | Expires: ${res.expires_at ? new Date(res.expires_at * 1000).toLocaleString() : 'never'}`;
+          $("mcpTokenJson").textContent = JSON.stringify(res.configs.mcp_json, null, 2);
+          $("mcpTokenClaudeCmd").innerHTML = cmdBox(res.configs.claude_command);
+          wireCopies($("mcpNewTokenBox"));
+          $("mcpTokenValue").value = "";
+          await loadMcpTokens();
+        } catch (e) {
+          toast(esc(e.message), "err");
+        } finally {
+          btn.disabled = false;
+        }
+      };
+    }
+  }
+
+  await loadMcpTokens();
+}
+
+async function loadMcpTokens() {
+  const listEl = $("mcpTokensList");
+  if (!listEl) return;
+  try {
+    const data = await api("/api/agents/tokens");
+    if (!data.tokens || data.tokens.length === 0) {
+      listEl.innerHTML = `<p class="muted small">No active bearer tokens yet. Generate one above to connect via HTTP.</p>`;
+      return;
+    }
+    listEl.innerHTML = `
+      <div class="token-table-wrap">
+        <table class="token-table">
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Scope</th>
+              <th>Expires</th>
+              <th>Last Seen</th>
+              <th class="r">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.tokens.map((t) => `
+              <tr class="${t.is_expired ? 'dim' : ''}">
+                <td>
+                  <div><b>${esc(t.name)}</b> <span class="mono dim small">#${esc(String(t.id))}</span></div>
+                  <div class="mono dim" style="font-size: 11px;">${esc(t.token_prefix || "dn_***")}</div>
+                </td>
+                <td><span class="pill ${t.scope === 'read' ? 'dim' : 'match'}">${esc(t.scope || 'full')}</span></td>
+                <td>${t.is_expired ? '<span class="pill bad">expired</span>' : (t.expires_at ? `<span title="${new Date(t.expires_at * 1000).toLocaleString()}">${until(t.expires_at)}</span>` : '<span class="dim">never</span>')}</td>
+                <td class="dim">${t.last_seen ? since(t.last_seen) : "never"}</td>
+                <td class="r"><button class="ghost small-btn danger" data-revoke="${esc(String(t.id))}" style="height: 24px; padding: 0 8px; font-size: 11px;" type="button">Revoke</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+    listEl.querySelectorAll("[data-revoke]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("Revoke this bearer token? Any agent using it will lose access.")) return;
+        b.disabled = true;
+        try {
+          await api("/api/agents/token/revoke", { method: "POST", body: { id: b.dataset.revoke } });
+          toast("Token revoked.");
+          await loadMcpTokens();
+        } catch (e) {
+          toast(esc(e.message), "err");
+          b.disabled = false;
+        }
+      };
+    });
+  } catch (e) {
+    listEl.innerHTML = `<p class="bad">${esc(e.message)}</p>`;
+  }
 }
 $("agRefresh").onclick = showAgentsPage;
 

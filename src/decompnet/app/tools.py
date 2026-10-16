@@ -206,6 +206,13 @@ ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
+READ_ONLY_TOOLS = {
+    "project_info", "get_function", "get_context", "read_data", "list_functions",
+    "search_notes", "find_similar", "guide", "read_file", "search_code",
+    "file_status", "list_projects", "open_gui", "progress", "import_status",
+}
+
+
 def tool_names(fork: bool) -> list[str]:
     """The tools that make sense for a project: forks and ROM projects share the core loop."""
     skip = ROM_ONLY if fork else FORK_ONLY
@@ -224,6 +231,8 @@ def call(net: RomNetwork, agent: Agent, slug: str, name: str, args: dict) -> str
     """Run one tool for the built-in agent; errors come back as text the model can act on."""
     if name not in HANDLERS:
         return f"error: unknown tool {name!r}"
+    if agent.scope == "read" and name not in READ_ONLY_TOOLS:
+        return f"error: read-only token cannot execute mutating action {name!r}"
     try:
         return HANDLERS[name](net, agent, slug, **_named(net, agent, slug, args))
     except NetworkError as e:
@@ -246,8 +255,14 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
             agent, slug = agent_of(ctx)
         except NetworkError as e:
             raise ToolError(str(e)) from None
+        if agent.scope == "read" and name not in READ_ONLY_TOOLS:
+            raise ToolError(f"read-only token cannot execute mutating action {name!r}")
         try:
-            return await anyio.to_thread.run_sync(lambda: HANDLERS[name](net, agent, slug, **_named(net, agent, slug, args)))
+            res = await anyio.to_thread.run_sync(lambda: HANDLERS[name](net, agent, slug, **_named(net, agent, slug, args)))
+            if getattr(agent, "_auto_selected", False):
+                setattr(agent, "_auto_selected", False)
+                return f"[Auto-selected project: {slug}]\n{res}"
+            return res
         except NetworkError as e:
             raise ToolError(str(e)) from None
 

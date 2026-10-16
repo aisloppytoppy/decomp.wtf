@@ -381,7 +381,77 @@
     <section class="panel"><header class="panel-head"><h2>Agent apps on this computer</h2><button class="ghost small-btn" id="agRefresh" type="button">Refresh</button></header><div class="pad" id="agList"></div></section>
     <div class="stack-col">
       <section class="panel"><header class="panel-head"><h2>Models with an API key</h2></header><div class="pad" id="apiBox"></div></section>
-      <section class="panel"><header class="panel-head"><h2>Use decomp.wtf from your agent</h2></header><div class="pad" id="mcpBox"></div></section>
+      <section class="panel">
+        <header class="panel-head"><h2>Use decomp.wtf from your agent</h2></header>
+        <div class="pad" id="mcpBox">
+          <p class="muted small">Connect the agent you talk to, once. Then ask it in your terminal: <i>“decompile my game at ~/roms/game.z64”</i>. It imports it, opens this view and works with every tool here.</p>
+          <div class="setup-group" id="mcpRows"><p class="muted small">Looking…</p></div>
+
+          <div class="setup-group">
+            <h3>Streamable HTTP MCP &amp; Bearer Tokens</h3>
+            <p class="muted small">Connect Cursor, Claude Desktop, remote agents, or Docker containers directly over HTTP using a Bearer token.</p>
+
+            <div class="field" style="margin-top: 8px;">
+              <span>Create or Set Bearer Token</span>
+              <div class="lz-fields" style="margin-top: 6px;">
+                <label class="field">
+                  <span class="muted small">Agent Name</span>
+                  <input type="text" id="mcpTokenName" placeholder="e.g. cursor, claude" value="chat">
+                </label>
+                <label class="field">
+                  <span class="muted small">Scope</span>
+                  <select id="mcpTokenScope">
+                    <option value="full">Full Access</option>
+                    <option value="read">Read-Only</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="muted small">Expiration</span>
+                  <select id="mcpTokenTtl">
+                    <option value="never">Never</option>
+                    <option value="1d">24 Hours</option>
+                    <option value="7d" selected>7 Days</option>
+                    <option value="30d">30 Days</option>
+                    <option value="90d">90 Days</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="muted small">Custom Token (optional)</span>
+                  <input type="text" id="mcpTokenValue" class="mono" placeholder="leave blank to auto-generate">
+                </label>
+              </div>
+              <div class="row" style="margin-top: 8px;">
+                <button class="primary small-btn" id="mcpCreateTokenBtn" type="button" style="height: 32px;">Generate Token</button>
+              </div>
+            </div>
+
+            <div id="mcpNewTokenBox" hidden style="margin-top: 12px; padding: 12px; background: var(--bg-alt); border-radius: 8px; border: 1px solid var(--line-soft);">
+              <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <p class="small" style="margin: 0;"><b>Generated Bearer Token:</b> <span class="muted small">(save now: plaintext token is never displayed again)</span></p>
+                <button class="ghost small-btn" id="mcpDismissTokenBtn" type="button" style="height: 22px; padding: 0 8px; font-size: 11px;">Dismiss</button>
+              </div>
+              <div id="mcpTokenCmdBox"></div>
+              <div id="mcpTokenMeta" style="margin-top: 6px; font-size: 11px;" class="dim"></div>
+              <p class="small" style="margin-top: 8px; margin-bottom: 4px;"><b>Cursor / Claude Desktop Config (mcpServers):</b></p>
+              <pre class="code" id="mcpTokenJson" style="max-height: 140px;"></pre>
+              <p class="small" style="margin-top: 8px; margin-bottom: 4px;"><b>Claude Code CLI Command:</b></p>
+              <div id="mcpTokenClaudeCmd"></div>
+            </div>
+
+            <div class="row" style="margin-top: 14px; justify-content: space-between; align-items: center;">
+              <p class="col-title" style="margin: 0;">Active Bearer Tokens</p>
+              <button class="ghost small-btn danger" id="mcpRevokeAllBtn" style="font-size: 11px; height: 24px;" type="button">Revoke All</button>
+            </div>
+            <div id="mcpTokensList" style="margin-top: 4px;"><p class="muted small">Loading tokens…</p></div>
+          </div>
+
+          <div class="setup-group">
+            <p class="col-title">Local Command Bridge (stdio)</p>
+            <pre class="code" id="mcpJson"></pre>
+            <p class="muted small">Requires local <code>decomp</code> command on this machine.</p>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </main>
